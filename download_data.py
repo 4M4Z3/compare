@@ -2,18 +2,20 @@ from google.cloud import bigquery
 from google.oauth2 import service_account
 from datetime import datetime, timedelta
 import os
-from multiprocessing import Pool, cpu_count, Value, Manager
+from multiprocessing import Pool, cpu_count, Manager, Lock
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import calendar
 import logging
 import sys
-from time import time
+from time import time, sleep
 import threading
+from google.api_core import retry
 
 # Global counter for tracking total progress
 class GlobalProgress:
     def __init__(self, total_days):
         self.manager = Manager()
+        self.lock = self.manager.Lock()
         self.completed = self.manager.Value('i', 0)
         self.successful = self.manager.Value('i', 0)
         self.skipped = self.manager.Value('i', 0)
@@ -21,7 +23,7 @@ class GlobalProgress:
         self.total_days = total_days
         
     def update(self, status):
-        with self.completed.get_lock():
+        with self.lock:
             self.completed.value += 1
             if status == "success":
                 self.successful.value += 1
@@ -73,6 +75,19 @@ def setup_logger(month_name):
     
     return logger
 
+# Custom retry decorator for BigQuery operations
+def retry_if_internal_error(exception):
+    """Return True if we should retry (in this case when it's an internal error), False otherwise"""
+    return isinstance(exception, Exception) and "500" in str(exception)
+
+@retry.Retry(predicate=retry_if_internal_error, initial=1.0, maximum=60.0, multiplier=2.0, deadline=600.0)
+def execute_query(client, query, job_config, logger, thread_name):
+    """Execute BigQuery query with retry logic"""
+    logger.debug(f"[{thread_name}] Running BigQuery job")
+    job = client.query(query, job_config=job_config)
+    logger.debug(f"[{thread_name}] Waiting for query results")
+    return job.result()
+
 def download_day(args):
     """Download data for a specific day."""
     date, client, logger = args
@@ -114,12 +129,8 @@ def download_day(args):
     """
     
     try:
-        # Run query with config
-        logger.debug(f"[{thread_name}] Running BigQuery job for {date_str}")
-        job = client.query(query, job_config=job_config)
-        
-        logger.debug(f"[{thread_name}] Waiting for query results")
-        results = job.result()
+        # Run query with retry logic
+        results = execute_query(client, query, job_config, logger, thread_name)
         
         logger.debug(f"[{thread_name}] Converting results to dataframe")
         df = results.to_dataframe()
@@ -129,7 +140,7 @@ def download_day(args):
         
         # Calculate processing time and stats
         processing_time = time() - start_time
-        gb_processed = job.total_bytes_processed / 1024 / 1024 / 1024
+        gb_processed = results.total_bytes_processed / 1024 / 1024 / 1024
         
         # Log completion with prominent formatting
         logger.debug(f"""
