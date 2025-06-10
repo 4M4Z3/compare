@@ -60,10 +60,10 @@ def process_day(date, project_id, bucket_name, credentials, logger):
     cpu_count = os.cpu_count() or 4
     
     # For e2-highcpu-16 (16 vCPUs, 16GB memory):
-    # - Keep 2 vCPUs for system and GCS operations
-    # - Limit concurrent workers due to memory constraints (1GB per worker)
-    day_workers = min(12, max(cpu_count - 2, 1))  # Max 12 workers to avoid memory pressure
-    chunk_workers = min(16, cpu_count)  # Cap at 16 for e2-highcpu-16
+    # - Conservative settings to prevent memory exhaustion
+    # - Each worker needs ~2GB memory headroom for data processing
+    day_workers = min(6, max(cpu_count // 3, 1))  # Max 6 concurrent days
+    chunk_workers = min(8, cpu_count // 2)  # Max 8 concurrent I/O operations
     
     # Skip if file already exists
     if os.path.exists(final_file):
@@ -305,10 +305,10 @@ def download_gencast_2024():
     cpu_count = os.cpu_count() or 4
     
     # For e2-highcpu-16 (16 vCPUs, 16GB memory):
-    # - Keep 2 vCPUs for system and GCS operations
-    # - Limit concurrent workers due to memory constraints (1GB per worker)
-    day_workers = min(12, max(cpu_count - 2, 1))  # Max 12 workers to avoid memory pressure
-    chunk_workers = min(16, cpu_count)  # Cap at 16 for e2-highcpu-16
+    # - Conservative settings to prevent memory exhaustion
+    # - Each worker needs ~2GB memory headroom for data processing
+    day_workers = min(6, max(cpu_count // 3, 1))  # Max 6 concurrent days
+    chunk_workers = min(8, cpu_count // 2)  # Max 8 concurrent I/O operations
     
     logger.info(f"""
 ====================================
@@ -324,9 +324,9 @@ Starting downloads for May-December 2024:
   * Instance: e2-highcpu-16
   * vCPUs: {cpu_count}
   * Memory: 16GB
-  * Reserved vCPUs: 2 (system & GCS)
+  * Memory per worker: ~2GB
 - Parallel Processing:
-  * Day-level workers: {day_workers} processes (memory-optimized)
+  * Day-level workers: {day_workers} processes (conservative)
   * Chunk download workers: {chunk_workers} threads
   * Chunk processing workers: {chunk_workers} threads
 ====================================
