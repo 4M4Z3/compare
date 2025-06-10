@@ -171,10 +171,6 @@ def download_month(month_tuple):
         logger.debug("Creating BigQuery client")
         client = bigquery.Client(credentials=credentials)
         
-        # Create data directory
-        logger.debug("Creating data directory if it doesn't exist")
-        os.makedirs('data', exist_ok=True)
-        
         # Get number of days in month
         _, num_days = calendar.monthrange(year, month)
         
@@ -245,6 +241,9 @@ Error: {str(e)}
         return f"Failed {month_name} {year}: {str(e)}"
 
 def download_gencast_2024_parallel():
+    # Create data directory first
+    os.makedirs('data', exist_ok=True)
+    
     # Setup main logger
     logging.basicConfig(
         level=logging.INFO,
