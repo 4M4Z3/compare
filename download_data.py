@@ -32,23 +32,37 @@ def setup_logger(name):
 
 def process_day(date, project_id, bucket_name, credentials, logger):
     """Process one day of data using BigQuery → GCS → Local approach."""
+    print(f"\n{'='*50}")
+    print(f"STARTING PROCESS FOR DATE: {date.strftime('%Y-%m-%d')}")
+    print(f"{'='*50}")
+    
     date_str = date.strftime('%Y%m%d')
     table_name = f"gencast_{date_str}"
-    local_file = f"data/gencast_{date_str}.csv"
+    final_file = f"data/gencast_{date_str}.csv"
+    temp_dir = f"data/temp_{date_str}"
     dataset = "gencast_export_data"
     
     # Skip if file already exists
-    if os.path.exists(local_file):
+    if os.path.exists(final_file):
+        print(f"File already exists for {date_str} - SKIPPING")
         logger.info(f"SKIPPED: {date_str} - file already exists")
         return "skipped"
     
     try:
+        print("\n1️⃣ Initializing clients...")
         # Initialize clients
         bq_client = bigquery.Client(credentials=credentials, project=project_id)
         storage_client = storage.Client(credentials=credentials, project=project_id)
         bucket = storage_client.bucket(bucket_name)
+        print("✅ Clients initialized successfully")
+        
+        # Create temp directory for chunks
+        os.makedirs(temp_dir, exist_ok=True)
+        print(f"📁 Created temporary directory: {temp_dir}")
         
         # Step 1: Run BigQuery query and save to temporary table
+        print("\n2️⃣ Running BigQuery query...")
+        print(f"📊 Querying data for {date.strftime('%Y-%m-%d')}")
         logger.info(f"Running BigQuery query for {date_str}")
         query = f"""
         SELECT
@@ -80,8 +94,10 @@ def process_day(date, project_id, bucket_name, credentials, logger):
         # Run query
         query_job = bq_client.query(query, job_config=job_config)
         query_job.result()  # Wait for query to complete
+        print("✅ BigQuery query completed successfully")
         
         # Step 2: Export to GCS
+        print("\n3️⃣ Exporting to Google Cloud Storage...")
         logger.info(f"Exporting to GCS for {date_str}")
         destination_uri = f"gs://{bucket_name}/temp/{table_name}/*.csv"
         
@@ -91,34 +107,97 @@ def process_day(date, project_id, bucket_name, credentials, logger):
             location="US"  # Adjust if your location is different
         )
         extract_job.result()  # Wait for export to complete
+        print("✅ Export to GCS completed successfully")
         
-        # Step 3: Download from GCS using gsutil
-        logger.info(f"Downloading from GCS for {date_str}")
+        # Step 3: Download chunks from GCS using gsutil
+        print("\n4️⃣ Downloading chunks from GCS...")
+        logger.info(f"Downloading chunks from GCS for {date_str}")
         gcs_path = f"gs://{bucket_name}/temp/{table_name}/"
         os.makedirs("data", exist_ok=True)
         
-        # Use gsutil for parallel download
-        cmd = f"gsutil -m cp {gcs_path}* data/"
+        # Download all chunks to temp directory
+        print(f"📥 Running gsutil to download chunks to {temp_dir}")
+        cmd = f"gsutil -m cp {gcs_path}* {temp_dir}/"
         subprocess.run(cmd, shell=True, check=True)
+        print("✅ All chunks downloaded successfully")
         
-        # Step 4: Cleanup
+        # Step 4: Combine chunks
+        print("\n5️⃣ Combining chunks...")
+        logger.info(f"Combining chunks for {date_str}")
+        chunk_files = sorted(os.listdir(temp_dir))
+        
+        if not chunk_files:
+            raise Exception("No chunks downloaded")
+        
+        print(f"📦 Found {len(chunk_files)} chunks to combine")
+            
+        # Write header from first chunk
+        print("📝 Reading header from first chunk...")
+        with open(os.path.join(temp_dir, chunk_files[0]), 'r') as first_chunk:
+            header = first_chunk.readline()
+            
+        print(f"📝 Creating final file: {final_file}")
+        with open(final_file, 'w') as outfile:
+            # Write header
+            outfile.write(header)
+            
+            # Process each chunk
+            total_rows = 0
+            for i, chunk_file in enumerate(chunk_files):
+                chunk_path = os.path.join(temp_dir, chunk_file)
+                print(f"\n🔄 Processing chunk {i+1}/{len(chunk_files)}: {chunk_file}")
+                
+                with open(chunk_path, 'r') as infile:
+                    # Skip header if not first file
+                    if i > 0:
+                        next(infile)
+                    # Write the rest of the chunk
+                    chunk_rows = 0
+                    for line in infile:
+                        outfile.write(line)
+                        chunk_rows += 1
+                    total_rows += chunk_rows
+                    print(f"   ✓ Added {chunk_rows:,} rows from chunk {i+1}")
+                        
+        print(f"✅ Successfully combined all chunks. Total rows: {total_rows:,}")
+        
+        # Step 5: Cleanup
+        print("\n6️⃣ Cleaning up...")
         logger.info(f"Cleaning up temporary resources for {date_str}")
         
         # Delete temporary table
+        print("🗑️ Deleting temporary BigQuery table...")
         bq_client.delete_table(f"{project_id}.{dataset}.{table_name}", not_found_ok=True)
         
         # Delete GCS files
+        print("🗑️ Deleting temporary files from GCS...")
         blobs = bucket.list_blobs(prefix=f"temp/{table_name}")
         for blob in blobs:
             blob.delete()
             
-        # Verify file size
-        file_size_mb = os.path.getsize(local_file) / (1024 * 1024)
+        # Delete temp directory with chunks
+        print("🗑️ Deleting temporary directory...")
+        import shutil
+        shutil.rmtree(temp_dir)
+            
+        # Verify final file size
+        file_size_mb = os.path.getsize(final_file) / (1024 * 1024)
+        print(f"\n{'='*50}")
+        print(f"✨ PROCESS COMPLETE FOR {date.strftime('%Y-%m-%d')} ✨")
+        print(f"📊 Final Statistics:")
+        print(f"   - Output file: {final_file}")
+        print(f"   - File size: {file_size_mb:.2f} MB")
+        print(f"   - Chunks combined: {len(chunk_files)}")
+        print(f"   - Total rows: {total_rows:,}")
+        print(f"{'='*50}\n")
+        
         logger.info(f"""
 ========== DAY COMPLETE ==========
 Date: {date_str}
-File: {local_file}
-Size: {file_size_mb:.2f} MB
+File: {final_file}
+Final Size: {file_size_mb:.2f} MB
+Chunks Combined: {len(chunk_files)}
+Total Rows: {total_rows:,}
 =================================
 """)
         
