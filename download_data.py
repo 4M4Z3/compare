@@ -8,6 +8,10 @@ import logging
 import sys
 from time import time
 import json
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
+import shutil
+from typing import List, Tuple
+from functools import partial
 
 def setup_logger(name):
     """Setup logger."""
@@ -29,6 +33,16 @@ def setup_logger(name):
     logger.addHandler(f_handler)
     
     return logger
+
+def download_chunk(blob, temp_dir: str, logger) -> Tuple[str, int]:
+    """Download a single chunk from GCS."""
+    try:
+        chunk_path = os.path.join(temp_dir, os.path.basename(blob.name))
+        blob.download_to_filename(chunk_path)
+        return chunk_path, 0
+    except Exception as e:
+        logger.error(f"Error downloading chunk {blob.name}: {str(e)}")
+        return "", 1
 
 def process_day(date, project_id, bucket_name, credentials, logger):
     """Process one day of data using BigQuery → GCS → Local approach."""
@@ -109,7 +123,7 @@ def process_day(date, project_id, bucket_name, credentials, logger):
         extract_job.result()  # Wait for export to complete
         print("✅ Export to GCS completed successfully")
         
-        # Step 3: Download chunks from GCS using Python client
+        # Step 3: Download chunks from GCS using parallel downloads
         print("\n4️⃣ Downloading chunks from GCS...")
         logger.info(f"Downloading chunks from GCS for {date_str}")
         prefix = f"temp/{table_name}/"
@@ -120,18 +134,32 @@ def process_day(date, project_id, bucket_name, credentials, logger):
             
         print(f"📦 Found {len(blobs)} chunks to download")
         
-        # Download each chunk
-        for i, blob in enumerate(blobs, 1):
-            chunk_path = os.path.join(temp_dir, os.path.basename(blob.name))
-            print(f"📥 Downloading chunk {i}/{len(blobs)}: {os.path.basename(blob.name)}")
-            blob.download_to_filename(chunk_path)
+        # Download chunks in parallel using ThreadPoolExecutor
+        chunk_paths = []
+        failed_downloads = 0
+        
+        with ThreadPoolExecutor(max_workers=min(10, len(blobs))) as executor:
+            download_func = partial(download_chunk, temp_dir=temp_dir, logger=logger)
+            futures = [executor.submit(download_func, blob) for blob in blobs]
+            
+            # Process results as they complete
+            for i, future in enumerate(futures, 1):
+                chunk_path, failed = future.result()
+                if failed:
+                    failed_downloads += 1
+                else:
+                    chunk_paths.append(chunk_path)
+                    print(f"📥 Downloaded chunk {i}/{len(blobs)}: {os.path.basename(chunk_path)}")
+        
+        if failed_downloads > 0:
+            raise Exception(f"Failed to download {failed_downloads} chunks")
             
         print("✅ All chunks downloaded successfully")
         
         # Step 4: Combine chunks
         print("\n5️⃣ Combining chunks...")
         logger.info(f"Combining chunks for {date_str}")
-        chunk_files = sorted(os.listdir(temp_dir))
+        chunk_files = sorted([f for f in os.listdir(temp_dir) if f.endswith('.csv')])
         
         if not chunk_files:
             raise Exception("No chunks downloaded")
@@ -144,27 +172,41 @@ def process_day(date, project_id, bucket_name, credentials, logger):
             header = first_chunk.readline()
             
         print(f"📝 Creating final file: {final_file}")
+        
+        # Process chunks in parallel
+        def process_chunk(chunk_file: str, is_first: bool = False) -> Tuple[int, List[str]]:
+            chunk_path = os.path.join(temp_dir, chunk_file)
+            chunk_rows = []
+            row_count = 0
+            
+            with open(chunk_path, 'r') as infile:
+                # Skip header if not first chunk
+                if not is_first:
+                    next(infile)
+                # Read all lines
+                for line in infile:
+                    chunk_rows.append(line)
+                    row_count += 1
+                    
+            return row_count, chunk_rows
+        
+        total_rows = 0
         with open(final_file, 'w') as outfile:
             # Write header
             outfile.write(header)
             
-            # Process each chunk
-            total_rows = 0
-            for i, chunk_file in enumerate(chunk_files):
-                chunk_path = os.path.join(temp_dir, chunk_file)
-                print(f"\n🔄 Processing chunk {i+1}/{len(chunk_files)}: {chunk_file}")
+            # Process chunks in parallel
+            with ThreadPoolExecutor(max_workers=min(10, len(chunk_files))) as executor:
+                futures = []
+                for i, chunk_file in enumerate(chunk_files):
+                    futures.append(executor.submit(process_chunk, chunk_file, i == 0))
                 
-                with open(chunk_path, 'r') as infile:
-                    # Skip header if not first file
-                    if i > 0:
-                        next(infile)
-                    # Write the rest of the chunk
-                    chunk_rows = 0
-                    for line in infile:
-                        outfile.write(line)
-                        chunk_rows += 1
-                    total_rows += chunk_rows
-                    print(f"   ✓ Added {chunk_rows:,} rows from chunk {i+1}")
+                # Write results in order
+                for i, future in enumerate(futures, 1):
+                    rows, chunk_data = future.result()
+                    outfile.writelines(chunk_data)
+                    total_rows += rows
+                    print(f"   ✓ Added {rows:,} rows from chunk {i}")
                         
         print(f"✅ Successfully combined all chunks. Total rows: {total_rows:,}")
         
@@ -183,7 +225,6 @@ def process_day(date, project_id, bucket_name, credentials, logger):
             
         # Delete temp directory with chunks
         print("🗑️ Deleting temporary directory...")
-        import shutil
         shutil.rmtree(temp_dir)
             
         # Verify final file size
