@@ -302,29 +302,52 @@ Starting downloads for April 2024:
 ====================================
 """)
     
-    # Process each day
+    # Prepare dates to process
+    dates = [datetime(year, month, day) for day in range(1, num_days + 1)]
+    
+    # Process days in parallel
     successful = 0
     skipped = 0
     failed = 0
+    completed = 0
     
-    for day in range(1, num_days + 1):
-        date = datetime(year, month, day)
-        result = process_day(date, project_id, bucket_name, credentials, logger)
+    # Use ProcessPoolExecutor for parallel processing
+    max_workers = min(5, num_days)  # Limit to 5 concurrent days to avoid overwhelming BigQuery
+    print(f"\n🚀 Processing {num_days} days with {max_workers} parallel workers")
+    
+    with ProcessPoolExecutor(max_workers=max_workers) as executor:
+        # Submit all jobs
+        future_to_date = {
+            executor.submit(process_day, date, project_id, bucket_name, credentials, logger): date
+            for date in dates
+        }
         
-        if result == "success":
-            successful += 1
-        elif result == "skipped":
-            skipped += 1
-        else:
-            failed += 1
-            
-        logger.info(f"""
+        # Process results as they complete
+        for future in future_to_date:
+            date = future_to_date[future]
+            try:
+                result = future.result()
+                completed += 1
+                
+                if result == "success":
+                    successful += 1
+                elif result == "skipped":
+                    skipped += 1
+                else:
+                    failed += 1
+                    
+                logger.info(f"""
 Progress Update:
-- Completed: {day}/{num_days} ({(day/num_days)*100:.1f}%)
+- Completed: {completed}/{num_days} ({(completed/num_days)*100:.1f}%)
 - Successful: {successful}
 - Skipped: {skipped}
 - Failed: {failed}
 """)
+                
+            except Exception as e:
+                logger.error(f"Error processing {date.strftime('%Y-%m-%d')}: {str(e)}")
+                failed += 1
+                completed += 1
     
     logger.info(f"""
 ====================================
