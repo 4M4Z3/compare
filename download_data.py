@@ -54,16 +54,6 @@ def process_day(date, project_id, bucket_name, credentials, logger):
     table_name = f"gencast_{date_str}"
     final_file = f"data/gencast_{date_str}.csv"
     temp_dir = f"data/temp_{date_str}"
-    dataset = "gencast_export_data"
-    
-    # Get optimal number of workers
-    cpu_count = os.cpu_count() or 4
-    
-    # For e2-highcpu-16 (16 vCPUs, 16GB memory):
-    # - Conservative settings to prevent memory exhaustion
-    # - Each worker needs ~2GB memory headroom for data processing
-    day_workers = min(6, max(cpu_count // 3, 1))  # Max 6 concurrent days
-    chunk_workers = min(8, cpu_count // 2)  # Max 8 concurrent I/O operations
     
     # Skip if file already exists
     if os.path.exists(final_file):
@@ -72,15 +62,16 @@ def process_day(date, project_id, bucket_name, credentials, logger):
         return "skipped"
     
     try:
+        # Ensure data and temp directories exist
+        os.makedirs('data', exist_ok=True)
+        os.makedirs(temp_dir, exist_ok=True)
+        
         print("\n1️⃣ Initializing clients...")
         # Initialize clients
         bq_client = bigquery.Client(credentials=credentials, project=project_id)
         storage_client = storage.Client(credentials=credentials, project=project_id)
         bucket = storage_client.bucket(bucket_name)
         print("✅ Clients initialized successfully")
-        
-        # Create temp directory for chunks
-        os.makedirs(temp_dir, exist_ok=True)
         print(f"📁 Created temporary directory: {temp_dir}")
         
         # Step 1: Run BigQuery query and save to temporary table
@@ -298,8 +289,18 @@ def download_gencast_2024():
     year = 2024
     months = range(5, 13)  # 5 = May, 12 = December
     
+    # Prepare all dates to process
+    dates = []
+    for month in months:
+        _, days_in_month = calendar.monthrange(year, month)
+        month_dates = [datetime(year, month, day) for day in range(1, days_in_month + 1)]
+        dates.extend(month_dates)
+    
+    # Sort dates to ensure sequential processing
+    dates.sort()
+    
     # Calculate total days
-    total_days = sum(calendar.monthrange(year, month)[1] for month in months)
+    total_days = len(dates)
     
     # Calculate optimal number of workers based on CPU count
     cpu_count = os.cpu_count() or 4
@@ -331,12 +332,6 @@ Starting downloads for May-December 2024:
   * Chunk processing workers: {chunk_workers} threads
 ====================================
 """)
-    
-    # Prepare all dates to process
-    dates = []
-    for month in months:
-        _, days_in_month = calendar.monthrange(year, month)
-        dates.extend([datetime(year, month, day) for day in range(1, days_in_month + 1)])
     
     # Process days in parallel
     successful = 0
