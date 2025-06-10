@@ -89,9 +89,9 @@ def download_day(args):
     logger.debug(f"[{thread_name}] START: Processing {date_str}")
     start_time = time()
     
-    # Set maximum bytes limit (100GB)
+    # Set maximum bytes limit (60GB)
     job_config = bigquery.QueryJobConfig(
-        maximum_bytes_billed=100 * 1024 * 1024 * 1024  # 100GB in bytes
+        maximum_bytes_billed=60 * 1024 * 1024 * 1024  # 60GB in bytes
     )
     
     query = f"""
@@ -145,15 +145,19 @@ File: {filename}
         return "success", date_str
         
     except Exception as e:
-        logger.error(f"""
+        error_msg = f"""
 [{thread_name}] !!!!!!!! DAY FAILED !!!!!!!!
 Date: {date_str}
 Error: {str(e)}
 !!!!!!!!!!!!!!!!!!!!!!!!!!
-""")
-        # Create error log
-        with open('data/error_log.txt', 'a') as f:
-            f.write(f"{date_str}: {str(e)}\n")
+"""
+        logger.error(error_msg)
+        
+        # Save failed date with timestamp and error
+        with open('data/failed_dates.txt', 'a') as f:
+            current_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            f.write(f"FAILED: {date_str} | Time: {current_time} | Error: {str(e)}\n")
+            
         global_progress.update("failed")
         return "failed", date_str
 
@@ -248,6 +252,12 @@ Error: {str(e)}
 def download_gencast_2024_parallel():
     # Create data directory first
     os.makedirs('data', exist_ok=True)
+    
+    # Create or clear the failed_dates.txt file
+    with open('data/failed_dates.txt', 'w') as f:
+        f.write("=== Failed Downloads Log ===\n")
+        f.write("Format: FAILED: YYYY-MM-DD | Time: YYYY-MM-DD HH:MM:SS | Error: error_message\n")
+        f.write("===============================================\n\n")
     
     # Setup main logger
     logging.basicConfig(
