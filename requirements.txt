@@ -1,0 +1,8 @@
+python-dateutil>=2.8.2
+numpy>=1.24.0
+cdsapi>=0.6.1
+xarray>=2023.1.0
+netCDF4>=1.6.3
+cfgrib>=0.9.10.3
+python-dotenv>=1.0.0
+google-cloud-bigquery>=3.14.1 
