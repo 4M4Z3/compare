@@ -2,11 +2,53 @@ from google.cloud import bigquery
 from google.oauth2 import service_account
 from datetime import datetime, timedelta
 import os
-from multiprocessing import Pool, cpu_count
+from multiprocessing import Pool, cpu_count, Value, Manager
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import calendar
 import logging
 import sys
 from time import time
+import threading
+
+# Global counter for tracking total progress
+class GlobalProgress:
+    def __init__(self, total_days):
+        self.manager = Manager()
+        self.completed = self.manager.Value('i', 0)
+        self.successful = self.manager.Value('i', 0)
+        self.skipped = self.manager.Value('i', 0)
+        self.failed = self.manager.Value('i', 0)
+        self.total_days = total_days
+        
+    def update(self, status):
+        with self.completed.get_lock():
+            self.completed.value += 1
+            if status == "success":
+                self.successful.value += 1
+            elif status == "skipped":
+                self.skipped.value += 1
+            elif status == "failed":
+                self.failed.value += 1
+                
+            # Calculate percentage
+            percentage = (self.completed.value / self.total_days) * 100
+            
+            # Print progress bar and stats
+            bar_length = 50
+            filled_length = int(bar_length * self.completed.value // self.total_days)
+            bar = '=' * filled_length + '-' * (bar_length - filled_length)
+            
+            print(f"""
+=== OVERALL PROGRESS [{bar}] {percentage:.1f}% ===
+Completed: {self.completed.value}/{self.total_days}
+✓ Successful: {self.successful.value}
+↷ Skipped: {self.skipped.value}
+✗ Failed: {self.failed.value}
+==========================================
+""")
+
+# Global progress tracker
+global_progress = None
 
 def setup_logger(month_name):
     """Setup logger for a specific month process."""
@@ -31,8 +73,87 @@ def setup_logger(month_name):
     
     return logger
 
+def download_day(args):
+    """Download data for a specific day."""
+    date, client, logger = args
+    date_str = date.strftime('%Y-%m-%d')
+    filename = f"data/gencast_{date.strftime('%Y%m%d')}.csv"
+    thread_name = threading.current_thread().name
+    
+    # Skip if file already exists
+    if os.path.exists(filename):
+        logger.debug(f"[{thread_name}] SKIPPED: {date_str} - file already exists")
+        global_progress.update("skipped")
+        return "skipped", date_str
+        
+    logger.debug(f"[{thread_name}] START: Processing {date_str}")
+    start_time = time()
+    
+    query = f"""
+    SELECT
+      f.time AS forecast_time,
+      ST_Y(t.geography) AS latitude,
+      ST_X(t.geography) AS longitude,
+      AVG(e.`2m_temperature`) AS temp_2m,
+      STDDEV(e.`2m_temperature`) AS temp_2m_stddev
+    FROM
+      `ultra-task-456813-d5.weathernext_gen_forecasts.126478713_1_0` AS t,
+      UNNEST(t.forecast) AS f,
+      UNNEST(f.ensemble) AS e
+    WHERE
+      t.init_time = TIMESTAMP('{date_str} 12:00:00')
+    GROUP BY
+      forecast_time, latitude, longitude
+    ORDER BY 
+      forecast_time, latitude, longitude
+    """
+    
+    try:
+        # Run query
+        logger.debug(f"[{thread_name}] Running BigQuery job for {date_str}")
+        job = client.query(query)
+        
+        logger.debug(f"[{thread_name}] Waiting for query results")
+        results = job.result()
+        
+        logger.debug(f"[{thread_name}] Converting results to dataframe")
+        df = results.to_dataframe()
+        
+        logger.debug(f"[{thread_name}] Saving results to {filename}")
+        df.to_csv(filename, index=False)
+        
+        # Calculate processing time and stats
+        processing_time = time() - start_time
+        gb_processed = job.total_bytes_processed / 1024 / 1024 / 1024
+        
+        # Log completion with prominent formatting
+        logger.debug(f"""
+[{thread_name}] ========== DAY COMPLETE ==========
+Date: {date_str}
+Time taken: {processing_time:.1f} seconds
+Data processed: {gb_processed:.2f} GB
+Rows saved: {df.shape[0]:,}
+File: {filename}
+=================================
+""")
+        global_progress.update("success")
+        return "success", date_str
+        
+    except Exception as e:
+        logger.error(f"""
+[{thread_name}] !!!!!!!! DAY FAILED !!!!!!!!
+Date: {date_str}
+Error: {str(e)}
+!!!!!!!!!!!!!!!!!!!!!!!!!!
+""")
+        # Create error log
+        with open('data/error_log.txt', 'a') as f:
+            f.write(f"{date_str}: {str(e)}\n")
+        global_progress.update("failed")
+        return "failed", date_str
+
 def download_month(month_tuple):
-    """Download all days for a specific month."""
+    """Download all days for a specific month using thread pool."""
     month, year = month_tuple
     month_name = calendar.month_name[month]
     logger = setup_logger(month_name)
@@ -58,95 +179,58 @@ def download_month(month_tuple):
         _, num_days = calendar.monthrange(year, month)
         
         # Generate dates for this month
-        start_date = datetime(year, month, 1)
-        end_date = datetime(year, month, num_days)
-        current_date = start_date
+        dates = [datetime(year, month, day) for day in range(1, num_days + 1)]
         
-        logger.info(f"Will process {num_days} days for {month_name}")
-        completed_days = 0
+        # Prepare arguments for each day
+        day_args = [(date, client, logger) for date in dates]
         
-        while current_date <= end_date:
-            date_str = current_date.strftime('%Y-%m-%d')
-            filename = f"data/gencast_{current_date.strftime('%Y%m%d')}.csv"
+        logger.info(f"Starting thread pool with {min(num_days, 10)} threads for {num_days} days")
+        
+        # Create thread pool and process days
+        with ThreadPoolExecutor(max_workers=min(10, num_days)) as executor:
+            # Submit all days to thread pool
+            future_to_date = {executor.submit(download_day, args): args[0] for args in day_args}
             
-            # Skip if file already exists
-            if os.path.exists(filename):
-                logger.info(f"SKIPPED: {date_str} - file already exists ({completed_days + 1}/{num_days})")
-                current_date += timedelta(days=1)
-                completed_days += 1
-                continue
-                
-            logger.info(f"START: Processing {date_str} ({completed_days + 1}/{num_days})")
-            start_time = time()
+            # Track completion
+            month_completed = 0
+            month_success = 0
+            month_skipped = 0
+            month_failed = 0
             
-            query = f"""
-            SELECT
-              f.time AS forecast_time,
-              ST_Y(t.geography) AS latitude,
-              ST_X(t.geography) AS longitude,
-              AVG(e.`2m_temperature`) AS temp_2m,
-              STDDEV(e.`2m_temperature`) AS temp_2m_stddev
-            FROM
-              `ultra-task-456813-d5.weathernext_gen_forecasts.126478713_1_0` AS t,
-              UNNEST(t.forecast) AS f,
-              UNNEST(f.ensemble) AS e
-            WHERE
-              t.init_time = TIMESTAMP('{date_str} 12:00:00')
-            GROUP BY
-              forecast_time, latitude, longitude
-            ORDER BY 
-              forecast_time, latitude, longitude
-            """
-            
-            try:
-                # Run query
-                logger.debug(f"Running BigQuery job for {date_str}")
-                job = client.query(query)
-                
-                logger.debug("Waiting for query results")
-                results = job.result()
-                
-                logger.debug("Converting results to dataframe")
-                df = results.to_dataframe()
-                
-                logger.debug(f"Saving results to {filename}")
-                df.to_csv(filename, index=False)
-                
-                # Calculate processing time and stats
-                processing_time = time() - start_time
-                gb_processed = job.total_bytes_processed / 1024 / 1024 / 1024
-                
-                # Log completion with prominent formatting
-                logger.info(f"""
-========== DAY COMPLETE ==========
-Date: {date_str} ({completed_days + 1}/{num_days})
-Time taken: {processing_time:.1f} seconds
-Data processed: {gb_processed:.2f} GB
-Rows saved: {df.shape[0]:,}
-File: {filename}
-=================================
+            # Process completed tasks as they finish
+            for future in as_completed(future_to_date):
+                date = future_to_date[future]
+                try:
+                    status, date_str = future.result()
+                    month_completed += 1
+                    
+                    if status == "success":
+                        month_success += 1
+                    elif status == "skipped":
+                        month_skipped += 1
+                    else:
+                        month_failed += 1
+                        
+                    # Log month progress (debug level to avoid cluttering main output)
+                    logger.debug(f"""
+{month_name} Progress:
+- Completed: {month_completed}/{num_days} ({(month_completed/num_days)*100:.1f}%)
+- Successful: {month_success}
+- Skipped: {month_skipped}
+- Failed: {month_failed}
 """)
-                
-                completed_days += 1
-                
-            except Exception as e:
-                logger.error(f"""
-!!!!!!!! DAY FAILED !!!!!!!!
-Date: {date_str}
-Error: {str(e)}
-!!!!!!!!!!!!!!!!!!!!!!!!!!
-""")
-                # Create error log
-                with open('data/error_log.txt', 'a') as f:
-                    f.write(f"{date_str}: {str(e)}\n")
-            
-            current_date += timedelta(days=1)
+                except Exception as e:
+                    logger.error(f"Error processing {date.strftime('%Y-%m-%d')}: {str(e)}")
+                    month_failed += 1
         
         # Log month completion
         logger.info(f"""
 ************************************************
 MONTH COMPLETE: {month_name} {year}
-Total days processed: {completed_days}/{num_days}
+Total days: {num_days}
+Successful: {month_success}
+Skipped: {month_skipped}
+Failed: {month_failed}
 ************************************************
 """)
         return f"Completed {month_name} {year}"
@@ -175,22 +259,33 @@ def download_gencast_2024_parallel():
     # Generate list of months to process (March to December)
     months_to_process = [(month, 2024) for month in range(3, 13)]
     
+    # Calculate total days
+    total_days = sum(calendar.monthrange(2024, month)[1] for month in range(3, 13))
+    
+    # Initialize global progress tracker
+    global global_progress
+    global_progress = GlobalProgress(total_days)
+    
     # Calculate total data size
     total_months = len(months_to_process)
     total_gb = total_months * 30 * 47  # approximate GB per month
     
+    num_processes = min(cpu_count(), total_months)
+    
     logger.info(f"""
 ====================================
 Starting parallel downloads for:
+- Total Days: {total_days}
 - Months: {total_months}
 - Daily data: ~47GB
 - Total data: ~{total_gb}GB
-- Parallel processes: {min(cpu_count(), total_months)}
+- Parallel processes: {num_processes}
+- Threads per process: 10
 ====================================
 """)
     
     # Create pool of workers
-    with Pool(min(cpu_count(), total_months)) as pool:
+    with Pool(num_processes) as pool:
         try:
             # Map months to worker processes
             results = pool.map_async(download_month, months_to_process)
@@ -231,6 +326,7 @@ GenCast 2024 Parallel Download
 - Starting from March 2024
 - Files saved in ./data/
 - Debug logs in data/debug_*.log
+- Using multiprocessing + multithreading
 - Press Ctrl+C to stop (progress saved)
 ====================================
 """)
