@@ -54,6 +54,11 @@ def process_day(date, project_id, bucket_name, credentials, logger):
     table_name = f"gencast_{date_str}"
     final_file = f"data/gencast_{date_str}.csv"
     temp_dir = f"data/temp_{date_str}"
+    dataset = "gencast_export_data"
+    
+    # Get optimal number of workers for this process
+    cpu_count = os.cpu_count() or 4
+    chunk_workers = min(8, cpu_count // 2)  # Max 8 concurrent I/O operations
     
     # Skip if file already exists
     if os.path.exists(final_file):
@@ -74,10 +79,11 @@ def process_day(date, project_id, bucket_name, credentials, logger):
         print("✅ Clients initialized successfully")
         print(f"📁 Created temporary directory: {temp_dir}")
         
-        # Step 1: Run BigQuery query and save to temporary table
+        # Step 1: Run BigQuery query
         print("\n2️⃣ Running BigQuery query...")
         print(f"📊 Querying data for {date.strftime('%Y-%m-%d')}")
         logger.info(f"Running BigQuery query for {date_str}")
+        
         query = f"""
         SELECT
             f.time AS forecast_time,
@@ -118,12 +124,12 @@ def process_day(date, project_id, bucket_name, credentials, logger):
         extract_job = bq_client.extract_table(
             f"{project_id}.{dataset}.{table_name}",
             destination_uri,
-            location="US"  # Adjust if your location is different
+            location="US"
         )
         extract_job.result()  # Wait for export to complete
         print("✅ Export to GCS completed successfully")
         
-        # Step 3: Download chunks from GCS using parallel downloads
+        # Step 3: Download chunks from GCS
         print("\n4️⃣ Downloading chunks from GCS...")
         logger.info(f"Downloading chunks from GCS for {date_str}")
         prefix = f"temp/{table_name}/"
@@ -131,8 +137,8 @@ def process_day(date, project_id, bucket_name, credentials, logger):
         
         if not blobs:
             raise Exception(f"No chunks found in GCS with prefix: {prefix}")
-            
-        print(f"�� Found {len(blobs)} chunks to download")
+        
+        print(f" Found {len(blobs)} chunks to download")
         
         # Download chunks in parallel using ThreadPoolExecutor
         chunk_paths = []
@@ -153,7 +159,7 @@ def process_day(date, project_id, bucket_name, credentials, logger):
         
         if failed_downloads > 0:
             raise Exception(f"Failed to download {failed_downloads} chunks")
-            
+        
         print("✅ All chunks downloaded successfully")
         
         # Step 4: Combine chunks
@@ -163,14 +169,14 @@ def process_day(date, project_id, bucket_name, credentials, logger):
         
         if not chunk_files:
             raise Exception("No chunks downloaded")
-            
+        
         print(f"📦 Found {len(chunk_files)} chunks to combine")
-            
+        
         # Write header from first chunk
         print("📝 Reading header from first chunk...")
         with open(os.path.join(temp_dir, chunk_files[0]), 'r') as first_chunk:
             header = first_chunk.readline()
-            
+        
         print(f"📝 Creating final file: {final_file}")
         
         # Process chunks in parallel
@@ -187,7 +193,7 @@ def process_day(date, project_id, bucket_name, credentials, logger):
                 for line in infile:
                     chunk_rows.append(line)
                     row_count += 1
-                    
+            
             return row_count, chunk_rows
         
         total_rows = 0
@@ -207,7 +213,7 @@ def process_day(date, project_id, bucket_name, credentials, logger):
                     outfile.writelines(chunk_data)
                     total_rows += rows
                     print(f"   ✓ Added {rows:,} rows from chunk {i}")
-                        
+        
         print(f"✅ Successfully combined all chunks. Total rows: {total_rows:,}")
         
         # Step 5: Cleanup
@@ -222,11 +228,11 @@ def process_day(date, project_id, bucket_name, credentials, logger):
         print("🗑️ Deleting temporary files from GCS...")
         for blob in blobs:
             blob.delete()
-            
+        
         # Delete temp directory with chunks
         print("🗑️ Deleting temporary directory...")
         shutil.rmtree(temp_dir)
-            
+        
         # Verify final file size
         file_size_mb = os.path.getsize(final_file) / (1024 * 1024)
         print(f"\n{'='*50}")
@@ -238,29 +244,13 @@ def process_day(date, project_id, bucket_name, credentials, logger):
         print(f"   - Total rows: {total_rows:,}")
         print(f"{'='*50}\n")
         
-        logger.info(f"""
-========== DAY COMPLETE ==========
-Date: {date_str}
-File: {final_file}
-Final Size: {file_size_mb:.2f} MB
-Chunks Combined: {len(chunk_files)}
-Total Rows: {total_rows:,}
-=================================
-""")
-        
         return "success"
         
     except Exception as e:
-        logger.error(f"""
-!!!!!!!! DAY FAILED !!!!!!!!
-Date: {date_str}
-Error: {str(e)}
-!!!!!!!!!!!!!!!!!!!!!!!!!!
-""")
-        # Log to failed_dates
-        with open('data/failed_dates.txt', 'a') as f:
-            current_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-            f.write(f"FAILED: {date_str} | Time: {current_time} | Error: {str(e)}\n")
+        logger.error(f"\n!!!!!!!! DAY FAILED !!!!!!!!")
+        logger.error(f"Date: {date_str}")
+        logger.error(f"Error: {str(e)}")
+        logger.error("!!!!!!!!!!!!!!!!!!!!!!!!!!\n")
         return "failed"
 
 def download_gencast_2024():
