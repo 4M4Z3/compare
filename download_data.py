@@ -285,11 +285,11 @@ def download_gencast_2024_parallel():
     )
     logger = logging.getLogger('main')
     
-    # Generate list of months to process (March only)
-    months_to_process = [(3, 2024)]  # Just March
+    # Generate list of months to process (April only)
+    months_to_process = [(4, 2024)]  # Just April
     
     # Calculate total days
-    total_days = calendar.monthrange(2024, 3)[1]  # Days in March
+    total_days = calendar.monthrange(2024, 4)[1]  # Days in April
     
     # Initialize global progress tracker
     global global_progress
@@ -305,7 +305,7 @@ def download_gencast_2024_parallel():
 ====================================
 Starting parallel downloads for:
 - Total Days: {total_days}
-- Month: March 2024
+- Month: April 2024
 - Daily data: ~47GB
 - Total data: ~{total_gb}GB
 - Parallel processes: {num_processes}
@@ -352,7 +352,7 @@ if __name__ == "__main__":
 ====================================
 GenCast 2024 Parallel Download
 ====================================
-- Starting from March 2024
+- Starting from April 2024
 - Files saved in ./data/
 - Debug logs in data/debug_*.log
 - Using multiprocessing + multithreading
