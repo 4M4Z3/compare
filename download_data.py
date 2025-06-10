@@ -56,6 +56,15 @@ def process_day(date, project_id, bucket_name, credentials, logger):
     temp_dir = f"data/temp_{date_str}"
     dataset = "gencast_export_data"
     
+    # Get optimal number of workers
+    cpu_count = os.cpu_count() or 4
+    
+    # For c5a.8xlarge (32 vCPUs):
+    # - Keep 2 CPUs free for system operations and SSH
+    # - Use more threads for I/O operations since they don't block CPU as much
+    day_workers = max(cpu_count - 2, 1)  # 30 workers for process pool
+    chunk_workers = cpu_count * 3  # 96 threads for I/O operations
+    
     # Skip if file already exists
     if os.path.exists(final_file):
         print(f"File already exists for {date_str} - SKIPPING")
@@ -132,13 +141,13 @@ def process_day(date, project_id, bucket_name, credentials, logger):
         if not blobs:
             raise Exception(f"No chunks found in GCS with prefix: {prefix}")
             
-        print(f"📦 Found {len(blobs)} chunks to download")
+        print(f"�� Found {len(blobs)} chunks to download")
         
         # Download chunks in parallel using ThreadPoolExecutor
         chunk_paths = []
         failed_downloads = 0
         
-        with ThreadPoolExecutor(max_workers=min(10, len(blobs))) as executor:
+        with ThreadPoolExecutor(max_workers=chunk_workers) as executor:
             download_func = partial(download_chunk, temp_dir=temp_dir, logger=logger)
             futures = [executor.submit(download_func, blob) for blob in blobs]
             
@@ -196,7 +205,7 @@ def process_day(date, project_id, bucket_name, credentials, logger):
             outfile.write(header)
             
             # Process chunks in parallel
-            with ThreadPoolExecutor(max_workers=min(10, len(chunk_files))) as executor:
+            with ThreadPoolExecutor(max_workers=chunk_workers) as executor:
                 futures = []
                 for i, chunk_file in enumerate(chunk_files):
                     futures.append(executor.submit(process_chunk, chunk_file, i == 0))
@@ -292,6 +301,15 @@ def download_gencast_2024():
     # Calculate total days
     total_days = sum(calendar.monthrange(year, month)[1] for month in months)
     
+    # Calculate optimal number of workers based on CPU count
+    cpu_count = os.cpu_count() or 4
+    
+    # For c5a.8xlarge (32 vCPUs):
+    # - Keep 2 CPUs free for system operations and SSH
+    # - Use more threads for I/O operations since they don't block CPU as much
+    day_workers = max(cpu_count - 2, 1)  # 30 workers for process pool
+    chunk_workers = cpu_count * 3  # 96 threads for I/O operations
+    
     logger.info(f"""
 ====================================
 Starting downloads for May-December 2024:
@@ -302,6 +320,16 @@ Starting downloads for May-December 2024:
 - Using dataset: {dataset}
 - Files saved in ./data/
 - Debug logs in data/debug_*.log
+- System Resources:
+  * Available CPUs: {cpu_count}
+  * Reserved CPUs: 2 (system & SSH)
+- Parallel Processing:
+  * Day-level workers: {day_workers} processes
+  * Chunk download workers: {chunk_workers} threads
+  * Chunk processing workers: {chunk_workers} threads
+  * Day-level workers: {day_workers}
+  * Chunk download workers: {chunk_workers}
+  * Chunk processing workers: {chunk_workers}
 ====================================
 """)
     
@@ -318,10 +346,9 @@ Starting downloads for May-December 2024:
     completed = 0
     
     # Use ProcessPoolExecutor for parallel processing
-    max_workers = min(5, len(dates))  # Limit to 5 concurrent days to avoid overwhelming BigQuery
-    print(f"\n🚀 Processing {len(dates)} days with {max_workers} parallel workers")
+    print(f"\n🚀 Processing {len(dates)} days with {day_workers} parallel workers")
     
-    with ProcessPoolExecutor(max_workers=max_workers) as executor:
+    with ProcessPoolExecutor(max_workers=day_workers) as executor:
         # Submit all jobs
         future_to_date = {
             executor.submit(process_day, date, project_id, bucket_name, credentials, logger): date
