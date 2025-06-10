@@ -138,6 +138,9 @@ def download_day(args):
         logger.debug(f"[{thread_name}] Saving results to {filename}")
         df.to_csv(filename, index=False)
         
+        # Log file size
+        file_size_gb = os.path.getsize(filename) / (1024 * 1024 * 1024)
+        
         # Calculate processing time and stats
         processing_time = time() - start_time
         gb_processed = results.total_bytes_processed / 1024 / 1024 / 1024
@@ -147,7 +150,8 @@ def download_day(args):
 [{thread_name}] ========== DAY COMPLETE ==========
 Date: {date_str}
 Time taken: {processing_time:.1f} seconds
-Data processed: {gb_processed:.2f} GB
+Data scanned: {gb_processed:.2f} GB
+Result file size: {file_size_gb:.2f} GB
 Rows saved: {df.shape[0]:,}
 File: {filename}
 =================================
