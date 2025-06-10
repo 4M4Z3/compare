@@ -264,7 +264,7 @@ Error: {str(e)}
         return "failed"
 
 def download_gencast_2024():
-    """Download GenCast data for April 2024."""
+    """Download GenCast data for May-December 2024."""
     # Create data directory
     os.makedirs('data', exist_ok=True)
     
@@ -285,15 +285,18 @@ def download_gencast_2024():
     bucket_name = "gencast-export-bucket"
     dataset = "gencast_export_data"
     
-    # Process April 2024
-    month = 4  # April
+    # Process May through December 2024
     year = 2024
-    _, num_days = calendar.monthrange(year, month)
+    months = range(5, 13)  # 5 = May, 12 = December
+    
+    # Calculate total days
+    total_days = sum(calendar.monthrange(year, month)[1] for month in months)
     
     logger.info(f"""
 ====================================
-Starting downloads for April 2024:
-- Days: {num_days}
+Starting downloads for May-December 2024:
+- Months: {len(months)} (May through December)
+- Total Days: {total_days}
 - Using BigQuery → GCS → Local approach
 - Using bucket: {bucket_name}
 - Using dataset: {dataset}
@@ -302,8 +305,11 @@ Starting downloads for April 2024:
 ====================================
 """)
     
-    # Prepare dates to process
-    dates = [datetime(year, month, day) for day in range(1, num_days + 1)]
+    # Prepare all dates to process
+    dates = []
+    for month in months:
+        _, days_in_month = calendar.monthrange(year, month)
+        dates.extend([datetime(year, month, day) for day in range(1, days_in_month + 1)])
     
     # Process days in parallel
     successful = 0
@@ -312,8 +318,8 @@ Starting downloads for April 2024:
     completed = 0
     
     # Use ProcessPoolExecutor for parallel processing
-    max_workers = min(5, num_days)  # Limit to 5 concurrent days to avoid overwhelming BigQuery
-    print(f"\n🚀 Processing {num_days} days with {max_workers} parallel workers")
+    max_workers = min(5, len(dates))  # Limit to 5 concurrent days to avoid overwhelming BigQuery
+    print(f"\n🚀 Processing {len(dates)} days with {max_workers} parallel workers")
     
     with ProcessPoolExecutor(max_workers=max_workers) as executor:
         # Submit all jobs
@@ -336,9 +342,15 @@ Starting downloads for April 2024:
                 else:
                     failed += 1
                     
+                # Calculate current month's progress
+                current_month = date.month
+                month_dates = [d for d in dates if d.month == current_month]
+                month_completed = len([d for d in dates[:completed] if d.month == current_month])
+                
                 logger.info(f"""
 Progress Update:
-- Completed: {completed}/{num_days} ({(completed/num_days)*100:.1f}%)
+- Overall: {completed}/{len(dates)} ({(completed/len(dates))*100:.1f}%)
+- Current Month ({calendar.month_name[current_month]}): {month_completed}/{len(month_dates)} ({(month_completed/len(month_dates))*100:.1f}%)
 - Successful: {successful}
 - Skipped: {skipped}
 - Failed: {failed}
@@ -352,10 +364,13 @@ Progress Update:
     logger.info(f"""
 ====================================
 Download Complete!
-- Total days: {num_days}
+- Total days processed: {len(dates)}
 - Successful: {successful}
 - Skipped: {skipped}
 - Failed: {failed}
+
+Monthly Breakdown:
+{chr(10).join(f'- {calendar.month_name[month]}: {calendar.monthrange(year, month)[1]} days' for month in months)}
 ====================================
 """)
 
