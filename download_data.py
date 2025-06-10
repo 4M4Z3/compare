@@ -89,6 +89,11 @@ def download_day(args):
     logger.debug(f"[{thread_name}] START: Processing {date_str}")
     start_time = time()
     
+    # Set maximum bytes limit (100GB)
+    job_config = bigquery.QueryJobConfig(
+        maximum_bytes_billed=100 * 1024 * 1024 * 1024  # 100GB in bytes
+    )
+    
     query = f"""
     SELECT
       f.time AS forecast_time,
@@ -109,9 +114,9 @@ def download_day(args):
     """
     
     try:
-        # Run query
+        # Run query with config
         logger.debug(f"[{thread_name}] Running BigQuery job for {date_str}")
-        job = client.query(query)
+        job = client.query(query, job_config=job_config)
         
         logger.debug(f"[{thread_name}] Waiting for query results")
         results = job.result()
