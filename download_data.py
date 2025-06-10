@@ -59,11 +59,11 @@ def process_day(date, project_id, bucket_name, credentials, logger):
     # Get optimal number of workers
     cpu_count = os.cpu_count() or 4
     
-    # For c5a.8xlarge (32 vCPUs):
-    # - Keep 2 CPUs free for system operations and SSH
-    # - Use more threads for I/O operations since they don't block CPU as much
-    day_workers = max(cpu_count - 2, 1)  # 30 workers for process pool
-    chunk_workers = cpu_count * 3  # 96 threads for I/O operations
+    # For e2-highcpu-16 (16 vCPUs, 16GB memory):
+    # - Keep 2 vCPUs for system and GCS operations
+    # - Limit concurrent workers due to memory constraints (1GB per worker)
+    day_workers = min(12, max(cpu_count - 2, 1))  # Max 12 workers to avoid memory pressure
+    chunk_workers = min(16, cpu_count)  # Cap at 16 for e2-highcpu-16
     
     # Skip if file already exists
     if os.path.exists(final_file):
@@ -304,11 +304,11 @@ def download_gencast_2024():
     # Calculate optimal number of workers based on CPU count
     cpu_count = os.cpu_count() or 4
     
-    # For c5a.8xlarge (32 vCPUs):
-    # - Keep 2 CPUs free for system operations and SSH
-    # - Use more threads for I/O operations since they don't block CPU as much
-    day_workers = max(cpu_count - 2, 1)  # 30 workers for process pool
-    chunk_workers = cpu_count * 3  # 96 threads for I/O operations
+    # For e2-highcpu-16 (16 vCPUs, 16GB memory):
+    # - Keep 2 vCPUs for system and GCS operations
+    # - Limit concurrent workers due to memory constraints (1GB per worker)
+    day_workers = min(12, max(cpu_count - 2, 1))  # Max 12 workers to avoid memory pressure
+    chunk_workers = min(16, cpu_count)  # Cap at 16 for e2-highcpu-16
     
     logger.info(f"""
 ====================================
@@ -321,15 +321,14 @@ Starting downloads for May-December 2024:
 - Files saved in ./data/
 - Debug logs in data/debug_*.log
 - System Resources:
-  * Available CPUs: {cpu_count}
-  * Reserved CPUs: 2 (system & SSH)
+  * Instance: e2-highcpu-16
+  * vCPUs: {cpu_count}
+  * Memory: 16GB
+  * Reserved vCPUs: 2 (system & GCS)
 - Parallel Processing:
-  * Day-level workers: {day_workers} processes
+  * Day-level workers: {day_workers} processes (memory-optimized)
   * Chunk download workers: {chunk_workers} threads
   * Chunk processing workers: {chunk_workers} threads
-  * Day-level workers: {day_workers}
-  * Chunk download workers: {chunk_workers}
-  * Chunk processing workers: {chunk_workers}
 ====================================
 """)
     
