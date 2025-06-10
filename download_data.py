@@ -37,7 +37,7 @@ def download_month(month_tuple):
     month_name = calendar.month_name[month]
     logger = setup_logger(month_name)
     
-    logger.info(f"Starting process for {month_name} {year}")
+    logger.info(f"=== Starting process for {month_name} {year} ===")
     
     try:
         # Setup
@@ -63,6 +63,7 @@ def download_month(month_tuple):
         current_date = start_date
         
         logger.info(f"Will process {num_days} days for {month_name}")
+        completed_days = 0
         
         while current_date <= end_date:
             date_str = current_date.strftime('%Y-%m-%d')
@@ -70,11 +71,13 @@ def download_month(month_tuple):
             
             # Skip if file already exists
             if os.path.exists(filename):
-                logger.info(f"Skipping {date_str} - file already exists")
+                logger.info(f"SKIPPED: {date_str} - file already exists ({completed_days + 1}/{num_days})")
                 current_date += timedelta(days=1)
+                completed_days += 1
                 continue
                 
-            logger.info(f"Processing {date_str}")
+            logger.info(f"START: Processing {date_str} ({completed_days + 1}/{num_days})")
+            start_time = time()
             
             query = f"""
             SELECT
@@ -96,11 +99,8 @@ def download_month(month_tuple):
             """
             
             try:
-                # Time tracking
-                start_time = time()
-                
                 # Run query
-                logger.debug(f"Starting BigQuery job for {date_str}")
+                logger.debug(f"Running BigQuery job for {date_str}")
                 job = client.query(query)
                 
                 logger.debug("Waiting for query results")
@@ -112,29 +112,52 @@ def download_month(month_tuple):
                 logger.debug(f"Saving results to {filename}")
                 df.to_csv(filename, index=False)
                 
-                # Calculate processing time
+                # Calculate processing time and stats
                 processing_time = time() - start_time
-                logger.info(f"✓ Saved {filename} (took {processing_time:.1f}s)")
+                gb_processed = job.total_bytes_processed / 1024 / 1024 / 1024
                 
-                # Log some stats
-                logger.debug(f"Query stats for {date_str}:")
-                logger.debug(f"- Bytes processed: {job.total_bytes_processed:,}")
-                logger.debug(f"- Bytes billed: {job.total_bytes_billed:,}")
-                logger.debug(f"- Row count: {df.shape[0]:,}")
+                # Log completion with prominent formatting
+                logger.info(f"""
+========== DAY COMPLETE ==========
+Date: {date_str} ({completed_days + 1}/{num_days})
+Time taken: {processing_time:.1f} seconds
+Data processed: {gb_processed:.2f} GB
+Rows saved: {df.shape[0]:,}
+File: {filename}
+=================================
+""")
+                
+                completed_days += 1
                 
             except Exception as e:
-                logger.error(f"Error processing {date_str}: {str(e)}")
+                logger.error(f"""
+!!!!!!!! DAY FAILED !!!!!!!!
+Date: {date_str}
+Error: {str(e)}
+!!!!!!!!!!!!!!!!!!!!!!!!!!
+""")
                 # Create error log
                 with open('data/error_log.txt', 'a') as f:
                     f.write(f"{date_str}: {str(e)}\n")
             
             current_date += timedelta(days=1)
         
-        logger.info(f"Completed all days for {month_name} {year}")
+        # Log month completion
+        logger.info(f"""
+************************************************
+MONTH COMPLETE: {month_name} {year}
+Total days processed: {completed_days}/{num_days}
+************************************************
+""")
         return f"Completed {month_name} {year}"
         
     except Exception as e:
-        logger.error(f"Fatal error in {month_name} process: {str(e)}")
+        logger.error(f"""
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+MONTH FAILED: {month_name} {year}
+Error: {str(e)}
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+""")
         return f"Failed {month_name} {year}: {str(e)}"
 
 def download_gencast_2024_parallel():
@@ -156,10 +179,15 @@ def download_gencast_2024_parallel():
     total_months = len(months_to_process)
     total_gb = total_months * 30 * 47  # approximate GB per month
     
-    logger.info(f"Starting parallel downloads for {total_months} months")
-    logger.info(f"Each day processes ~47GB")
-    logger.info(f"Total data to process: ~{total_gb}GB")
-    logger.info(f"Using {min(cpu_count(), total_months)} parallel processes")
+    logger.info(f"""
+====================================
+Starting parallel downloads for:
+- Months: {total_months}
+- Daily data: ~47GB
+- Total data: ~{total_gb}GB
+- Parallel processes: {min(cpu_count(), total_months)}
+====================================
+""")
     
     # Create pool of workers
     with Pool(min(cpu_count(), total_months)) as pool:
@@ -175,22 +203,37 @@ def download_gencast_2024_parallel():
                 logger.info(result)
                 
         except KeyboardInterrupt:
-            logger.warning("Download interrupted - progress saved")
+            logger.warning("""
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+INTERRUPTED - Progress saved
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+""")
             pool.terminate()
             pool.join()
             return
         
         except Exception as e:
-            logger.error(f"Error in parallel processing: {str(e)}")
+            logger.error(f"""
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+PARALLEL PROCESSING ERROR
+Error: {str(e)}
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+""")
             pool.terminate()
             pool.join()
             return
 
 if __name__ == "__main__":
-    print("Starting parallel GenCast 2024 downloads (March onwards)...")
-    print("Files will be saved in ./data/")
-    print("Debug logs will be created per month in data/debug_*.log")
-    print("Press Ctrl+C to stop at any time - progress saved per month\n")
+    print("""
+====================================
+GenCast 2024 Parallel Download
+====================================
+- Starting from March 2024
+- Files saved in ./data/
+- Debug logs in data/debug_*.log
+- Press Ctrl+C to stop (progress saved)
+====================================
+""")
     
     try:
         download_gencast_2024_parallel()
