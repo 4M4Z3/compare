@@ -109,16 +109,23 @@ def process_day(date, project_id, bucket_name, credentials, logger):
         extract_job.result()  # Wait for export to complete
         print("✅ Export to GCS completed successfully")
         
-        # Step 3: Download chunks from GCS using gsutil
+        # Step 3: Download chunks from GCS using Python client
         print("\n4️⃣ Downloading chunks from GCS...")
         logger.info(f"Downloading chunks from GCS for {date_str}")
-        gcs_path = f"gs://{bucket_name}/temp/{table_name}/"
-        os.makedirs("data", exist_ok=True)
+        prefix = f"temp/{table_name}/"
+        blobs = list(bucket.list_blobs(prefix=prefix))
         
-        # Download all chunks to temp directory
-        print(f"📥 Running gsutil to download chunks to {temp_dir}")
-        cmd = f"gsutil -m cp {gcs_path}* {temp_dir}/"
-        subprocess.run(cmd, shell=True, check=True)
+        if not blobs:
+            raise Exception(f"No chunks found in GCS with prefix: {prefix}")
+            
+        print(f"📦 Found {len(blobs)} chunks to download")
+        
+        # Download each chunk
+        for i, blob in enumerate(blobs, 1):
+            chunk_path = os.path.join(temp_dir, os.path.basename(blob.name))
+            print(f"📥 Downloading chunk {i}/{len(blobs)}: {os.path.basename(blob.name)}")
+            blob.download_to_filename(chunk_path)
+            
         print("✅ All chunks downloaded successfully")
         
         # Step 4: Combine chunks
@@ -128,7 +135,7 @@ def process_day(date, project_id, bucket_name, credentials, logger):
         
         if not chunk_files:
             raise Exception("No chunks downloaded")
-        
+            
         print(f"📦 Found {len(chunk_files)} chunks to combine")
             
         # Write header from first chunk
@@ -171,7 +178,6 @@ def process_day(date, project_id, bucket_name, credentials, logger):
         
         # Delete GCS files
         print("🗑️ Deleting temporary files from GCS...")
-        blobs = bucket.list_blobs(prefix=f"temp/{table_name}")
         for blob in blobs:
             blob.delete()
             
